@@ -5,3 +5,4 @@ langchain-openai
 langchain-huggingface
 chromadb
 pymupdf
+sentence-transformers
