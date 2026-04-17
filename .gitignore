@@ -1,0 +1,5 @@
+venv/
+chroma_db/
+*.gguf
+__pycache__/
+course_robot_sessions_*.json
