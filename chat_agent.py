@@ -1,5 +1,4 @@
 import os
-import re
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
@@ -16,104 +15,93 @@ class DFR_RAG_Agent:
         self.llm = None
 
     def set_model(self, mode, model_name=None, api_key=None, api_base=None):
-        """
-        全动态模型挂载器。接收用户从前端传来的自定义配置。
-        """
+        """动态挂载模型引擎"""
         try:
             if mode == "local":
-                # 用户填什么名字，Ollama就调什么模型
-                target_model = model_name if model_name else "qwen2"
-                self.llm = ChatOllama(model=target_model, temperature=0.3)
+                self.llm = ChatOllama(model=model_name or "qwen2", temperature=0.3)
             else:
-                # BYOK (Bring Your Own Key) 模式，兼容所有 OpenAI 格式的接口
-                target_model = model_name if model_name else "glm-4"
-                target_key = api_key if api_key else "EMPTY"
-                target_base = api_base if api_base else "https://open.bigmodel.cn/api/paas/v4/"
-
                 self.llm = ChatOpenAI(
-                    temperature=0.3,
-                    model=target_model,
-                    openai_api_key=target_key,
-                    openai_api_base=target_base
+                    model=model_name or "glm-4",
+                    openai_api_key=api_key or "EMPTY",
+                    openai_api_base=api_base or "https://open.bigmodel.cn/api/paas/v4/",
+                    temperature=0.3
                 )
-            return True, "模型初始化成功"
+            return True, "OK"
         except Exception as e:
             return False, str(e)
 
-    # ...(下面保留原有的 get_available_sources, change_file_scope, delete_session_data, ask 方法，无需修改)
     def get_available_sources(self, session_id=None):
+        """获取当前可见的文档源"""
         data = self.db.get()
-        result = {"public": set(), "private": set()}
-        if not data or 'metadatas' not in data:
-            return {"public": [], "private": []}
+        res = {"public": set(), "private": set()}
+        if not data or 'metadatas' not in data: return {"public": [], "private": []}
         for meta in data['metadatas']:
             if not meta: continue
-            scope = meta.get("scope", "")
-            source = meta.get("source", "")
+            scope, source = meta.get("scope", ""), meta.get("source", "")
             if scope == "public":
-                result["public"].add(source)
+                res["public"].add(source)
             elif session_id and scope == f"session_{session_id}":
-                result["private"].add(source)
-        return {"public": sorted(list(result["public"])), "private": sorted(list(result["private"]))}
+                res["private"].add(source)
+        return {"public": sorted(list(res["public"])), "private": sorted(list(res["private"]))}
 
     def change_file_scope(self, filename, old_scope, new_scope):
-        try:
-            data = self.db.get(where={"$and": [{"source": filename}, {"scope": old_scope}]})
-            if data and data['ids']:
-                metadatas = data['metadatas']
-                for meta in metadatas: meta['scope'] = new_scope
-                self.db.update(ids=data['ids'], metadatas=metadatas)
-                return True
-            return False
-        except:
-            return False
+        """权限流转：修改文档的作用域"""
+        data = self.db.get(where={"$and": [{"source": filename}, {"scope": old_scope}]})
+        if data and data['ids']:
+            new_metas = data['metadatas']
+            for m in new_metas: m['scope'] = new_scope
+            self.db.update(ids=data['ids'], metadatas=new_metas)
+            return True
+        return False
+
+    # ==========================================
+    # 🗑️ 数据删除内核方法
+    # ==========================================
+    def delete_document(self, filename, scope):
+        """删除指定作用域下的特定文档的所有向量"""
+        data = self.db.get(where={"$and": [{"source": filename}, {"scope": scope}]})
+        if data and data['ids']:
+            self.db.delete(ids=data['ids'])
+            return True
+        return False
 
     def delete_session_data(self, session_id):
-        try:
-            data = self.db.get(where={"scope": f"session_{session_id}"})
-            if data and data['ids']: self.db.delete(ids=data['ids'])
-        except:
-            pass
+        """连根拔起：删除某个会话下的所有私有向量数据"""
+        data = self.db.get(where={"scope": f"session_{session_id}"})
+        if data and data['ids']:
+            self.db.delete(ids=data['ids'])
+            return True
+        return False
 
     def ask(self, question, selected_sources=None, session_id=None, include_public=True):
-        scope_filters = []
-        if include_public: scope_filters.append({"scope": "public"})
-        if session_id: scope_filters.append({"scope": f"session_{session_id}"})
+        """DFR 空间隔离检索与多模态问答支持"""
+        scopes = []
+        if include_public: scopes.append({"scope": "public"})
+        if session_id: scopes.append({"scope": f"session_{session_id}"})
 
-        filter_dict = None
-        if len(scope_filters) == 1:
-            filter_dict = scope_filters[0]
-        elif len(scope_filters) > 1:
-            filter_dict = {"$or": scope_filters}
+        filter_dict = {"$or": scopes} if len(scopes) > 1 else (scopes[0] if scopes else None)
 
         if selected_sources:
-            source_filter = {"source": {"$in": selected_sources}} if len(selected_sources) > 1 else {
+            s_filter = {"source": {"$in": selected_sources}} if len(selected_sources) > 1 else {
                 "source": selected_sources[0]}
-            if filter_dict:
-                filter_dict = {"$and": [filter_dict, source_filter]}
-            else:
-                filter_dict = source_filter
+            filter_dict = {"$and": [filter_dict, s_filter]} if filter_dict else s_filter
 
-        retriever = self.db.as_retriever(search_kwargs={"k": 4, "filter": filter_dict})
+        retriever = self.db.as_retriever(search_kwargs={"k": 5, "filter": filter_dict})
         docs = retriever.invoke(question)
 
-        if not docs: return "❌ 未找到相关信息。", []
+        if not docs: return "❌ 未检索到相关知识，请调整问题或检查知识库。", []
 
-        context_text = ""
-        citations = []
-        for i, doc in enumerate(docs):
-            source = doc.metadata.get('source', '未知文档')
-            scope_label = "公共库" if doc.metadata.get('scope') == "public" else "对话专属"
-            citations.append(f"[{i + 1}] 《{source}》 ({scope_label})")
-            context_text += f"\n--- 资料片段 {i + 1} ---\n{doc.page_content}\n"
+        ctx, cites = "", []
+        for i, d in enumerate(docs):
+            src = d.metadata.get('source', '未知')
+            cites.append(f"[{i + 1}] 《{src}》")
+            ctx += f"\n--- 片段 {i + 1} ---\n{d.page_content}\n"
 
+        # 💡 核心修改：在 System Prompt 植入多模态指令，迫使大模型输出图片链接锚点
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "你是一个专业的学术助教。请基于参考资料回答问题。"),
-            ("human", "参考资料：\n{context}\n\n问题：{question}")
+            ("system",
+             "你是一个专业助教 CourseRobot。请基于提供的资料片段严谨地回答问题。\n⚠️【核心指令】：如果资料片段中包含图片链接标记（如 ![图表资产](路径)），并且你的回答参考了该段落的内容，请你务必在回答的合适位置原样输出这个图片链接标记，以便向用户展示原图。\n如果资料中没有答案，请明确告知。"),
+            ("human", "资料：\n{context}\n\n问题：{question}")
         ])
-
         chain = prompt | self.llm | StrOutputParser()
-        answer = chain.invoke({"context": context_text, "question": question})
-        return answer, citations
-
-
+        return chain.invoke({"context": ctx, "question": question}), cites
