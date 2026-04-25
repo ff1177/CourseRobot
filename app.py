@@ -99,7 +99,8 @@ def ensure_engine_ready():
         cfg["mode"],
         cfg["local_name"] if cfg["mode"] == "local" else cfg["cloud_model"],
         cfg["cloud_key"],
-        cfg["cloud_base"]
+        # 💡 新增：将本地的 local_base 也传入引擎
+        cfg.get("local_base", "http://localhost:11434") if cfg["mode"] == "local" else cfg["cloud_base"]
     )
 
 
@@ -197,7 +198,9 @@ with st.sidebar:
             cfg["cloud_model"] = st.text_input("模型名", cfg["cloud_model"])
             cfg["cloud_key"] = st.text_input("API 密钥", cfg["cloud_key"], type="password")
         else:
-            cfg["local_name"] = st.text_input("Ollama 模型名", cfg["local_name"])
+            cfg["local_name"] = st.text_input("Ollama 模型名", cfg.get("local_name", "qwen2"))
+            # 💡 新增：允许用户在 UI 端修改 Ollama 的连接地址
+            cfg["local_base"] = st.text_input("Ollama 节点地址", cfg.get("local_base", "http://localhost:11434"))
 
         if st.button("💾 应用配置", use_container_width=True):
             save_to_memory()
@@ -334,6 +337,11 @@ if page == "💬 智能对话":
 
             if not retry:
                 chat_data["messages"].append({"role": "user", "content": current_q})
+
+                # 💡 修复 1：去掉 rerun 后，这里需要立刻在屏幕上把用户刚刚发的话显示出来
+                with st.chat_message("user", avatar="🧑‍🎓"):
+                    st.markdown(current_q)
+
                 # AI 自动重命名会话
                 if chat_data["name"] == "新会话" and st.session_state.agent.llm:
                     try:
@@ -344,7 +352,7 @@ if page == "💬 智能对话":
                     except:
                         pass
                 save_to_memory()
-                st.rerun()
+                # 💡 修复 2：已经删除了这里的 st.rerun() ！！让程序直接往下走去思考！
 
             # 生成回答
             with st.chat_message("assistant", avatar="🤖"):
